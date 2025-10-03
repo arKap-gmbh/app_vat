@@ -5,7 +5,7 @@ from typing import Dict, List, Optional
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta
 
-DATABASE_FILE = "databaseaziendearkapinterno.xlsx"
+DATABASE_FILE = ""
 ALLOWED_DOMAIN = "@arkap.ch"
 CODE_EXPIRY_MINUTES = 10
 SESSION_TIMEOUT_MINUTES = 60
