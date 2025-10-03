@@ -5,7 +5,29 @@ from typing import Dict, List, Optional
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta
 
-DATABASE_FILE = ""
+def get_dropbox_download_link(shared_link):
+    if 'dropbox.com' in shared_link:
+        return shared_link.replace('dl=0', 'dl=1').replace('www.dropbox.com', 'dl.dropboxusercontent.com')
+    return shared_link
+
+def load_database_from_dropbox():
+    try:
+        if 'DROPBOX_FILE_URL' in st.secrets:
+            dropbox_url = st.secrets["DROPBOX_FILE_URL"]
+        else:
+            st.warning("⚠️ Add DROPBOX_FILE_URL to Streamlit Secrets")
+            return None
+        download_url = get_dropbox_download_link(dropbox_url)
+        with st.spinner("📥 Downloading database..."):
+            response = requests.get(download_url, timeout=30)
+            response.raise_for_status()
+            df = pd.read_excel(io.BytesIO(response.content))
+            st.success(f"✅ Database loaded: {len(df)} companies")
+            return df
+    except Exception as e:
+        st.error(f"❌ Error: {str(e)}")
+        return None
+
 ALLOWED_DOMAIN = "@arkap.ch"
 CODE_EXPIRY_MINUTES = 10
 SESSION_TIMEOUT_MINUTES = 60
@@ -51,7 +73,6 @@ class CompanyDatabase:
         if 'Country Code' in self.db.columns:
             for cc in self.db['Country Code'].unique():
                 if pd.notna(cc): self.country_idx[str(cc).upper()] = self.db[self.db['Country Code'] == cc].index.tolist()
-        st.success(f"✅ DB: {len(self.db)} companies, {len(self.name_idx)} names")
     def search_name(self, name, country=None):
         k = name.lower().strip()
         if k in self.name_idx:
@@ -82,12 +103,9 @@ class AuthenticationManager:
     def verify(self, e, c):
         if e not in st.session_state.auth_codes: return False, "No code"
         d = st.session_state.auth_codes[e]
-        if datetime.now() - d['timestamp'] > timedelta(minutes=CODE_EXPIRY_MINUTES):
-            del st.session_state.auth_codes[e]; return False, "Expired"
+        if datetime.now() - d['timestamp'] > timedelta(minutes=CODE_EXPIRY_MINUTES): del st.session_state.auth_codes[e]; return False, "Expired"
         if d['attempts'] >= 3: del st.session_state.auth_codes[e]; return False, "Too many"
-        if d['code'] == c:
-            st.session_state.authenticated, st.session_state.user_email, st.session_state.auth_time = True, e, datetime.now()
-            del st.session_state.auth_codes[e]; return True, "Success"
+        if d['code'] == c: st.session_state.authenticated, st.session_state.user_email, st.session_state.auth_time = True, e, datetime.now(); del st.session_state.auth_codes[e]; return True, "Success"
         d['attempts'] += 1; return False, f"{3-d['attempts']} left"
     def is_valid(self): return st.session_state.authenticated and st.session_state.auth_time and datetime.now() - st.session_state.auth_time <= timedelta(minutes=SESSION_TIMEOUT_MINUTES)
     def logout(self): st.session_state.authenticated, st.session_state.user_email, st.session_state.auth_time = False, "", None
@@ -115,9 +133,8 @@ class MultiModeExtractor:
         if self.use_db and self.db:
             r = self.db.search_name(name, country)
             if r: return {**r, 'search_method': 'DB-Name', 'status': 'Found'}
-            if vat:
-                r = self.db.search_vat(vat, country)
-                if r: return {**r, 'search_method': 'DB-VAT', 'status': 'Found'}
+            if vat: r = self.db.search_vat(vat, country); 
+            if r: return {**r, 'search_method': 'DB-VAT', 'status': 'Found'}
             w = self._web(name, web, country); w['search_method'] = 'DB failed-Web'; return w
         w = self._web(name, web, country); w['search_method'] = 'Web only'; return w
     def _web(self, name, web, country):
@@ -172,38 +189,26 @@ def show_main():
         if st.button("Logout"): AuthenticationManager().logout(); st.rerun()
     st.markdown("---")
     if st.session_state.company_db is None:
-        st.header("📊 Database Setup"); st.info(f"Looking for: {DATABASE_FILE} in : {os.getcwd()}")
-        st.warning("If the file is not found, please upload it using the uploader below or place it in the script folder. For more help, see the [documentation](https://your-docs-link-here.com).")
-        uploaded = st.file_uploader("Upload Database (or place file in script folder)", type=['xlsx', 'xls', 'csv'])
-        if uploaded:
-            try:
-                df = pd.read_csv(uploaded) if uploaded.name.endswith('.csv') else pd.read_excel(uploaded)
-                st.session_state.company_db = CompanyDatabase(df); st.rerun()
-            except Exception as e: st.error(f"Error: {e}")
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("🔄 Try Load from Path", type="primary"):
-                try:
-                    if os.path.exists(DATABASE_FILE):
-                        df = pd.read_excel(DATABASE_FILE); st.session_state.company_db = CompanyDatabase(df); st.rerun()
-                    else: st.error(f"File not found at: {os.path.abspath(DATABASE_FILE)}")
-                except Exception as e: st.error(f"Error: {e}")
-        with c2:
-            if st.button("⏭️ Skip - Web Only", type="secondary"): st.session_state.company_db = None; st.session_state.search_mode = 'web'; st.rerun()
+        st.header("📊 Database Setup")
+        with st.expander("ℹ️ Dropbox Setup", expanded=True):
+            st.write("1. Share file on Dropbox → Copy link")
+            st.write('2. App Settings → Secrets → Add: DROPBOX_FILE_URL = "your_link"')
+        if st.button("📥 Load from Dropbox", type="primary"):
+            df = load_database_from_dropbox()
+            if df: st.session_state.company_db = CompanyDatabase(df); st.rerun()
+        st.markdown("---")
+        up = st.file_uploader("Or Upload", type=['xlsx','csv'])
+        if up: df = pd.read_csv(up) if up.name.endswith('.csv') else pd.read_excel(up); st.session_state.company_db = CompanyDatabase(df); st.rerun()
+        if st.button("⏭️ Web Only"): st.session_state.search_mode = 'web'; st.rerun()
         return
     if st.session_state.search_mode is None:
-        st.header("🔍 Select Mode")
         c1, c2 = st.columns(2)
         with c1:
-            st.subheader("🗄️ DB + Web"); st.write("• DB first → Web fallback")
-            if st.button("Use DB+Web", type="primary", use_container_width=True):
-                if st.session_state.company_db: st.session_state.search_mode = 'db'; st.rerun()
-                else: st.error("DB not available")
+            if st.button("🗄️ DB+Web", type="primary", use_container_width=True): st.session_state.search_mode = 'db'; st.rerun()
         with c2:
-            st.subheader("🌐 Web Only"); st.write("• Direct scraping")
-            if st.button("Use Web Only", use_container_width=True): st.session_state.search_mode = 'web'; st.rerun()
+            if st.button("🌐 Web Only", use_container_width=True): st.session_state.search_mode = 'web'; st.rerun()
         return
-    st.info(f"**Mode:** {st.session_state.search_mode.upper()}")
+    st.info(f"Mode: {st.session_state.search_mode.upper()}")
     if st.button("Change"): st.session_state.search_mode = None; st.rerun()
     st.markdown("---")
     t1, t2 = st.tabs(["Bulk", "Single"])
@@ -214,7 +219,7 @@ def show_main():
             if st.button("Process"):
                 ext = MultiModeExtractor(st.session_state.company_db, st.session_state.search_mode=='db')
                 p = st.progress(0); res = ext.process_list(df, lambda c,t: p.progress(c/t))
-                st.success("Done"); rdf = pd.DataFrame(res); st.dataframe(rdf)
+                rdf = pd.DataFrame(res); st.dataframe(rdf)
                 c1,c2,c3 = st.columns(3)
                 with c1: st.metric("Total", len(res))
                 with c2: st.metric("Found", len([r for r in res if r['status']=='Found']))
@@ -231,14 +236,14 @@ def show_main():
             if r['status']=='Found':
                 st.success(f"✅ {r.get('search_method')}")
                 if r.get('source')=='database':
-                    st.subheader("Info"); c1,c2=st.columns(2)
+                    c1,c2=st.columns(2)
                     with c1:
                         for k in ['company_name','vat_code']: 
                             if k in r: st.write(f"**{k}:** {r[k]}")
                     with c2:
                         for k in ['country_code','nace_code']: 
                             if k in r: st.write(f"**{k}:** {r[k]}")
-                    st.subheader("Financial"); c1,c2,c3=st.columns(3)
+                    c1,c2,c3=st.columns(3)
                     with c1:
                         if 'last_yr' in r: st.metric("Year",r['last_yr'])
                         if 'employees' in r: st.metric("Emp",safe_format(r.get('employees')))
@@ -247,12 +252,7 @@ def show_main():
                         if 'ebitda_th' in r: st.metric("EBITDA",safe_format(r.get('ebitda_th'),pre="€",suf="k"))
                     with c3:
                         if 'pfn_th' in r: st.metric("PFN",safe_format(r.get('pfn_th'),pre="€",suf="k"))
-                else:
-                    st.info("Web data")
-                    for k,v in r.items():
-                        if k not in ['company_name','website','status','source','search_method','country_code']: st.write(f"{k}: {v}")
             else: st.warning("Not found")
-            with st.expander("Raw"): st.json(r)
 
 def main():
     st.set_page_config(page_title="arKap", page_icon="⚡", layout="wide")
